@@ -809,11 +809,32 @@ describe("resolveSubagentModel", () => {
     expect(result).toBe("openai/gpt-5");
   });
 
-  test("uses letta/auto-memory for reflection subagents by default", async () => {
+  test("falls back to parent model handle for reflection subagents (patch: avoid letta/auto-memory on self-hosted)", async () => {
+    // Patch behavior: instead of unconditionally returning the cloud-only
+    // "letta/auto-memory" handle (which 404s on self-hosted servers without
+    // that handle registered), fall back to the parent agent's own model.
+    // The agent's configured model is the single source of truth — same
+    // principle as the server-side letta/auto compaction short-circuit.
     const result = await resolveSubagentModel({
       subagentType: "reflection",
       recommendedModel: "inherit",
-      parentModelHandle: "lc-anthropic/parent-model",
+      parentModelHandle: "anthropic/claude-opus-4-7",
+      availableHandles: new Set(),
+    });
+
+    expect(result).toBe("anthropic/claude-opus-4-7");
+  });
+
+  test("falls back to letta/auto-memory only when no parent handle is available", async () => {
+    // Edge case: if there's no parent model to inherit from (e.g. very early
+    // bootstrap), the cloud handle is still the least-bad default. Self-hosted
+    // users hitting this path will get an actionable 404 rather than a
+    // mysterious crash, and in practice every spawned reflection subagent has
+    // a parent agent with a model.
+    const result = await resolveSubagentModel({
+      subagentType: "reflection",
+      recommendedModel: "inherit",
+      parentModelHandle: null,
       availableHandles: new Set(),
     });
 
@@ -884,14 +905,16 @@ describe("resolveSubagentModel", () => {
     expect(result).toBe("openai/gpt-5");
   });
 
-  test("uses letta/auto-memory for reflection subagents with no recommended model", async () => {
+  test("falls back to parent model for reflection subagents with no recommended model (patch)", async () => {
+    // Same reasoning as the patched default path above: prefer the parent's
+    // own model handle over the hardcoded cloud "letta/auto-memory" handle.
     const result = await resolveSubagentModel({
       subagentType: "reflection",
-      parentModelHandle: "lc-anthropic/parent-model",
+      parentModelHandle: "anthropic/claude-opus-4-7",
       availableHandles: new Set(),
     });
 
-    expect(result).toBe("letta/auto-memory");
+    expect(result).toBe("anthropic/claude-opus-4-7");
   });
 
   test("honors reflection subagent model overrides", async () => {

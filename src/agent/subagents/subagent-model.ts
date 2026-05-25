@@ -158,6 +158,17 @@ export async function resolveSubagentModel(options: {
       }
     }
 
+    // Fork patch: upstream returns the cloud-only "letta/auto-memory" handle
+    // unconditionally here, which 404s on self-hosted servers that don't have
+    // that handle registered. Single source of truth = the parent agent's own
+    // configured model. Mirrors the local-backend short-circuit above and the
+    // server-side letta/auto compaction patch on the Letta server fork.
+    // Only fall through to letta/auto-memory if no parent handle is known
+    // (rare bootstrap case where 404 is actionable rather than mysterious).
+    if (parentModelHandle) {
+      return parentModelHandle;
+    }
+
     return "letta/auto-memory";
   }
 
