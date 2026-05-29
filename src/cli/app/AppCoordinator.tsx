@@ -4005,6 +4005,24 @@ export function App({
     [refreshDerived],
   );
 
+  // Handle paste success (e.g., image attached). Surfaces a status line
+  // above the input so screen-reader users get an explicit announcement;
+  // the inline [Image #N] placeholder alone is easy to miss when the
+  // cursor jumps past it.
+  const handlePasteSuccess = useCallback(
+    (message: string) => {
+      const statusId = uid("status");
+      buffersRef.current.byId.set(statusId, {
+        kind: "status",
+        id: statusId,
+        lines: [`✓ ${message}`],
+      });
+      buffersRef.current.order.push(statusId);
+      refreshDerived();
+    },
+    [refreshDerived],
+  );
+
   const { handleInterrupt } = useInterruptHandler({
     abortControllerRef,
     agentId,
@@ -5094,6 +5112,7 @@ export function App({
         handleInterrupt={handleInterrupt}
         handleModelSelect={handleModelSelect}
         handlePasteError={handlePasteError}
+        handlePasteSuccess={handlePasteSuccess}
         handlePermissionModeChange={handlePermissionModeChange}
         handlePersonalitySelect={handlePersonalitySelect}
         handleProfileEscapeCancel={handleProfileEscapeCancel}

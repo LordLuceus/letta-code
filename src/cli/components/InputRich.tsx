@@ -916,6 +916,7 @@ export function Input({
   inputDisabled = false,
   conversationId,
   onPasteError,
+  onPasteSuccess,
   restoredInput,
   onRestoredInputConsumed,
   networkPhase = null,
@@ -966,6 +967,7 @@ export function Input({
   inputDisabled?: boolean;
   conversationId?: string;
   onPasteError?: (message: string) => void;
+  onPasteSuccess?: (message: string) => void;
   restoredInput?: string | null;
   onRestoredInputConsumed?: () => void;
   networkPhase?: "upload" | "download" | "error" | null;
@@ -2053,6 +2055,7 @@ export function Input({
                   onBangAtEmpty={handleBangAtEmpty}
                   onBackspaceAtEmpty={handleBackspaceAtEmpty}
                   onPasteError={onPasteError}
+                  onPasteSuccess={onPasteSuccess}
                 />
               </Box>
             </Box>
@@ -2142,6 +2145,7 @@ export function Input({
     handleBangAtEmpty,
     handleBackspaceAtEmpty,
     onPasteError,
+    onPasteSuccess,
     currentCursorPosition,
     handleFileAutocompleteApply,
     handleCommandSelect,

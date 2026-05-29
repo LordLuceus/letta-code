@@ -10,7 +10,7 @@ import RawTextInput from "ink-text-input";
 import { useEffect, useRef, useState } from "react";
 import {
   translatePasteForImages,
-  tryImportClipboardImageMac,
+  tryImportClipboardImage,
 } from "@/cli/helpers/clipboard";
 import {
   allocatePaste,
@@ -49,6 +49,14 @@ interface PasteAwareTextInputProps {
    * Called when an image paste fails (e.g., image too large).
    */
   onPasteError?: (message: string) => void;
+
+  /**
+   * Called when an image paste succeeds. Useful for surfacing a status line
+   * above the input so screen-reader users get an explicit announcement that
+   * the screenshot landed (the inline `[Image #N]` placeholder is otherwise
+   * easy to miss when the cursor jumps past it).
+   */
+  onPasteSuccess?: (message: string) => void;
 }
 
 function countLines(text: string): number {
@@ -131,6 +139,7 @@ export function PasteAwareTextInput({
   onBangAtEmpty,
   onBackspaceAtEmpty,
   onPasteError,
+  onPasteSuccess,
 }: PasteAwareTextInputProps) {
   const { internal_eventEmitter } = useStdin();
   const [displayValue, setDisplayValue] = useState(value);
@@ -220,7 +229,7 @@ export function PasteAwareTextInput({
       if (key.ctrl && input === "v") {
         // Fire async handler (can't await in useInput callback)
         (async () => {
-          const result = await tryImportClipboardImageMac();
+          const result = await tryImportClipboardImage();
           if (result) {
             if ("error" in result) {
               // Report the error via callback
@@ -244,6 +253,9 @@ export function PasteAwareTextInput({
             const nextCaret = at + clip.length;
             setNudgeCursorOffset(nextCaret);
             caretOffsetRef.current = nextCaret;
+            onPasteSuccessRef.current?.(
+              `Pasted image (${result.width}\u00d7${result.height})`,
+            );
           }
         })();
         return;
@@ -297,13 +309,16 @@ export function PasteAwareTextInput({
         if ((!translated || translated.length === 0) && payload.length === 0) {
           // Fire async handler
           (async () => {
-            const clipResult = await tryImportClipboardImageMac();
+            const clipResult = await tryImportClipboardImage();
             if (clipResult) {
               if ("error" in clipResult) {
                 onPasteErrorRef.current?.(clipResult.error);
                 return;
               }
               insertTranslated(clipResult.placeholder);
+              onPasteSuccessRef.current?.(
+                `Pasted image (${clipResult.width}\u00d7${clipResult.height})`,
+              );
             }
           })();
           return;
@@ -322,7 +337,7 @@ export function PasteAwareTextInput({
       ) {
         // Fire async handler
         (async () => {
-          const result = await tryImportClipboardImageMac();
+          const result = await tryImportClipboardImage();
           if (result) {
             if ("error" in result) {
               onPasteErrorRef.current?.(result.error);
@@ -343,6 +358,9 @@ export function PasteAwareTextInput({
             const nextCaret = at + placeholder.length;
             setNudgeCursorOffset(nextCaret);
             caretOffsetRef.current = nextCaret;
+            onPasteSuccessRef.current?.(
+              `Pasted image (${result.width}\u00d7${result.height})`,
+            );
           }
         })();
       }
@@ -374,6 +392,11 @@ export function PasteAwareTextInput({
   useEffect(() => {
     onPasteErrorRef.current = onPasteError;
   }, [onPasteError]);
+
+  const onPasteSuccessRef = useRef(onPasteSuccess);
+  useEffect(() => {
+    onPasteSuccessRef.current = onPasteSuccess;
+  }, [onPasteSuccess]);
 
   // Consolidated raw stdin handler for Option+Arrow navigation and Option+Delete
   // Uses internal_eventEmitter (Ink's private API) for escape sequences that useInput doesn't parse correctly.

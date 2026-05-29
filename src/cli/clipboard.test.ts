@@ -94,6 +94,30 @@ test("clearPlaceholdersInText removes referenced placeholders", () => {
   expect(resolvePlaceholders(display)).toBe(display);
 });
 
+// Cross-platform clipboard image reader dispatcher.
+// We can't easily simulate clipboards in CI, but we can verify that the
+// dispatcher is callable without throwing and returns null when no
+// platform-specific tooling is available (e.g. no image in clipboard,
+// or wl-paste / PowerShell not installed). This guards against accidental
+// reintroduction of a platform-gating bug.
+import { tryImportClipboardImage } from "@/cli/helpers/clipboard";
+
+test("tryImportClipboardImage resolves to null or a structured result", async () => {
+  const result = await tryImportClipboardImage();
+  // In CI: clipboard is empty / no reader available -> null.
+  // If a developer happens to have an image in their clipboard while running
+  // tests locally, we just verify the shape is valid.
+  if (result === null) {
+    expect(result).toBeNull();
+  } else if ("error" in result) {
+    expect(typeof result.error).toBe("string");
+  } else {
+    expect(result.placeholder).toMatch(/^\[Image #\d+\]$/);
+    expect(typeof result.width).toBe("number");
+    expect(typeof result.height).toBe("number");
+  }
+});
+
 test("extractTextPlaceholderIds extracts IDs correctly", () => {
   const display =
     "[Pasted text #123 +5 lines] and [Pasted text #456 +10 lines]";

@@ -222,6 +222,7 @@ type AppViewProps = {
     },
   ) => Promise<void>;
   handlePasteError: (message: string) => void;
+  handlePasteSuccess: (message: string) => void;
   handlePermissionModeChange: (mode: PermissionMode) => void;
   handlePersonalitySelect: (
     personalityId: PersonalityId,
@@ -407,6 +408,7 @@ export function AppView(props: AppViewProps) {
     handleInterrupt,
     handleModelSelect,
     handlePasteError,
+    handlePasteSuccess,
     handlePermissionModeChange,
     handlePersonalitySelect,
     handleProfileEscapeCancel,
@@ -771,6 +773,7 @@ export function AppView(props: AppViewProps) {
                 inputDisabled={btwState.status === "complete"}
                 conversationId={conversationId}
                 onPasteError={handlePasteError}
+                onPasteSuccess={handlePasteSuccess}
                 restoredInput={restoredInput}
                 onRestoredInputConsumed={() => setRestoredInput(null)}
                 networkPhase={networkPhase}
