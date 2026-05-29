@@ -383,7 +383,29 @@ function getClipboardImageToTempFileLinux(): {
 
   const tempPath = join(tmpdir(), `letta-clipboard-${Date.now()}.png`);
 
-  const tryTool = (cmd: string, args: string[]): boolean => {
+  type ImageKind = "png" | "bmp";
+
+  // Validate magic bytes for the requested format. We must verify, because
+  // clipboard tools will sometimes return success with a non-image payload
+  // (HTML, text, etc.) when the requested MIME isn't actually available.
+  const validateMagic = (buf: Buffer, kind: ImageKind): boolean => {
+    if (kind === "png") {
+      // PNG magic: 89 50 4E 47 0D 0A 1A 0A
+      return (
+        buf.length >= 8 &&
+        buf[0] === 0x89 &&
+        buf[1] === 0x50 &&
+        buf[2] === 0x4e &&
+        buf[3] === 0x47
+      );
+    }
+    // BMP magic: 42 4D ("BM"). DIB-only payloads (no file header) won't match
+    // and we'll skip them — wl-paste --type image/bmp on WSLg ships the full
+    // BITMAPFILEHEADER, so this works for the WSL case we care about.
+    return buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d;
+  };
+
+  const tryTool = (cmd: string, args: string[], kind: ImageKind): boolean => {
     try {
       const buf = execFileSync(cmd, args, {
         stdio: ["ignore", "pipe", "ignore"],
@@ -392,14 +414,10 @@ function getClipboardImageToTempFileLinux(): {
       if (!buf || buf.length === 0) return false;
       // execFileSync returns a Buffer when no encoding is set
       const out = buf as unknown as Buffer;
-      // Quick sanity check on PNG magic bytes (89 50 4E 47)
-      if (
-        out.length < 8 ||
-        out[0] !== 0x89 ||
-        out[1] !== 0x50 ||
-        out[2] !== 0x4e ||
-        out[3] !== 0x47
-      ) {
+      if (!validateMagic(out, kind)) {
+        clipDebug(
+          `linux ${cmd} returned ${out.length} bytes but magic bytes don't match ${kind}`,
+        );
         return false;
       }
       writeFileSync(tempPath, out);
@@ -412,17 +430,46 @@ function getClipboardImageToTempFileLinux(): {
     }
   };
 
-  // Wayland first (most modern distros)
-  if (tryTool("wl-paste", ["--type", "image/png"])) {
+  // Preferred: PNG via Wayland (most modern distros).
+  if (tryTool("wl-paste", ["--type", "image/png"], "png")) {
     return { tempPath, uti: "public.png" };
   }
 
-  // X11 fallback
-  if (tryTool("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"])) {
+  // Preferred: PNG via X11.
+  if (
+    tryTool(
+      "xclip",
+      ["-selection", "clipboard", "-t", "image/png", "-o"],
+      "png",
+    )
+  ) {
     return { tempPath, uti: "public.png" };
   }
 
-  clipDebug("linux: neither wl-paste nor xclip produced a PNG");
+  // Fallback: BMP via Wayland. This is the WSLg path — WSLg drops the Windows
+  // CF_DIB / CF_BITMAP onto the Linux clipboard as `image/bmp` only (no PNG
+  // re-encode), so the PNG-first attempts above always miss on WSL. sharp /
+  // libvips handles BMP including the BI_BITFIELDS compression variant that
+  // Windows screenshot tools produce, so once we get the bytes onto disk the
+  // existing resize pipeline does the format normalization for us.
+  if (tryTool("wl-paste", ["--type", "image/bmp"], "bmp")) {
+    return { tempPath, uti: "public.bmp" };
+  }
+
+  // Fallback: BMP via X11.
+  if (
+    tryTool(
+      "xclip",
+      ["-selection", "clipboard", "-t", "image/bmp", "-o"],
+      "bmp",
+    )
+  ) {
+    return { tempPath, uti: "public.bmp" };
+  }
+
+  clipDebug(
+    "linux: neither wl-paste nor xclip produced a PNG or BMP from the clipboard",
+  );
   return null;
 }
 
