@@ -7,7 +7,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { release, tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { resizeImageIfNeeded } from "@/utils/image-resize";
 import { allocateImage } from "./paste-registry";
@@ -365,15 +365,164 @@ function getClipboardImageToTempFileWin32(): {
 }
 
 /**
+ * One-time check for whether we're running under WSL (any version).
+ * Three independent signals; any one is sufficient. Cheap, but we still
+ * cache because we hit this on every paste.
+ */
+let wslDetected: boolean | null = null;
+function isWslEnvironment(): boolean {
+  if (wslDetected !== null) return wslDetected;
+  if (process.platform !== "linux") {
+    wslDetected = false;
+    return false;
+  }
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    wslDetected = true;
+    return true;
+  }
+  try {
+    if (/microsoft/i.test(release())) {
+      wslDetected = true;
+      return true;
+    }
+  } catch {}
+  try {
+    const procVersion = readFileSync("/proc/version", "utf8");
+    if (/microsoft/i.test(procVersion)) {
+      wslDetected = true;
+      return true;
+    }
+  } catch {}
+  wslDetected = false;
+  return false;
+}
+
+/**
+ * Read image from the *Windows* clipboard, via PowerShell interop from WSL.
+ *
+ * WSLg's clipboard bridge silently rewrites Windows CF_DIB / CF_BITMAP into
+ * `image/bmp` (no PNG re-encode), and `sharp` / libvips has no BMP decoder,
+ * so the Linux-side `wl-paste`/`xclip` paths can never produce a usable
+ * image for WSL users. Bypass the WSLg clipboard entirely: run PowerShell
+ * as a Windows process (where the clipboard is still the original Windows
+ * one) and have it save the image as PNG to a path that's reachable from
+ * both sides via `wslpath -w`.
+ *
+ * Approach is from Kiko Creates' blog post (2026-02-11) and the same one
+ * Claude Code uses for WSL clipboard support.
+ *
+ * Returns null when:
+ *   - we can't find `wslpath` or `powershell.exe` (e.g. `appendWindowsPath=false`)
+ *   - no image is in the Windows clipboard
+ *   - PowerShell threw, or didn't write the file
+ */
+function getClipboardImageToTempFileWsl(): {
+  tempPath: string;
+  uti: string;
+} | null {
+  if (!isWslEnvironment()) return null;
+
+  const linuxPath = join(tmpdir(), `letta-clipboard-${Date.now()}.png`);
+
+  // Translate Linux path to a Windows UNC path PowerShell can write to.
+  let windowsPath: string;
+  try {
+    windowsPath = execFileSync("wslpath", ["-w", linuxPath], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch (err) {
+    clipDebug(
+      `wsl: wslpath failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  if (!windowsPath) {
+    clipDebug("wsl: wslpath returned empty string");
+    return null;
+  }
+
+  // PowerShell 5.1 inbox script. `-Sta` is required for the Clipboard class.
+  // We pass the Windows-side path via an env var so quoting doesn't bite.
+  const ps = [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "if ([System.Windows.Forms.Clipboard]::ContainsImage()) {",
+    "  $img = [System.Windows.Forms.Clipboard]::GetImage()",
+    "  if ($img -ne $null) {",
+    "    $img.Save($env:LETTA_CLIPBOARD_WIN_PATH, [System.Drawing.Imaging.ImageFormat]::Png)",
+    "    Write-Output 'OK'",
+    "  } else { Write-Output 'NO_IMAGE' }",
+    "} else { Write-Output 'NO_IMAGE' }",
+  ].join("; ");
+
+  // Environment variables don't cross the WSL -> Windows process boundary
+  // unless their NAME is listed in WSLENV. Without this, `$env:LETTA_CLIPBOARD_WIN_PATH`
+  // arrives as the empty string on the Windows side and PowerShell's
+  // Bitmap.Save() throws "Value cannot be null. Parameter name: stream".
+  // We append our var name to whatever WSLENV already contains (preserving
+  // any prior entries from the user's shell / Windows Terminal).
+  const existingWslEnv = process.env.WSLENV || "";
+  const wslEnv = existingWslEnv
+    ? `${existingWslEnv}:LETTA_CLIPBOARD_WIN_PATH`
+    : "LETTA_CLIPBOARD_WIN_PATH";
+
+  try {
+    const result = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-Sta", "-Command", ps],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        env: {
+          ...process.env,
+          LETTA_CLIPBOARD_WIN_PATH: windowsPath,
+          WSLENV: wslEnv,
+        },
+      },
+    ).trim();
+
+    if (result !== "OK") {
+      clipDebug(`wsl: PowerShell returned '${result}'`);
+      if (existsSync(linuxPath)) {
+        try {
+          unlinkSync(linuxPath);
+        } catch {}
+      }
+      return null;
+    }
+    if (!existsSync(linuxPath)) {
+      clipDebug(
+        "wsl: PowerShell reported OK but no file appeared on Linux side",
+      );
+      return null;
+    }
+    return { tempPath: linuxPath, uti: "public.png" };
+  } catch (err) {
+    clipDebug(
+      `wsl: powershell.exe threw: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    if (existsSync(linuxPath)) {
+      try {
+        unlinkSync(linuxPath);
+      } catch {}
+    }
+    return null;
+  }
+}
+
+/**
  * Read image from Linux clipboard to a temp PNG file.
  *
  * Tries Wayland (`wl-paste`) first, then X11 (`xclip`). Both tools must be
  * installed by the user; we don't bundle them. If neither is present (or
  * the clipboard contains no image), returns null silently.
  *
- * We request `image/png` explicitly so the tool will emit PNG if available.
- * If the clipboard only contains BMP (e.g. via WSLg) we'll silently miss it
- * — fixing WSL is out of scope for this patch.
+ * On WSL: after the PNG-first attempts miss (which they always do because
+ * WSLg only exposes Windows clipboard images as BMP, and sharp/libvips has
+ * no BMP decoder), fall through to `getClipboardImageToTempFileWsl` which
+ * reaches into Windows via PowerShell interop. See that function for the
+ * detailed why.
  */
 function getClipboardImageToTempFileLinux(): {
   tempPath: string;
@@ -383,40 +532,24 @@ function getClipboardImageToTempFileLinux(): {
 
   const tempPath = join(tmpdir(), `letta-clipboard-${Date.now()}.png`);
 
-  type ImageKind = "png" | "bmp";
+  const isPngMagic = (buf: Buffer): boolean =>
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47;
 
-  // Validate magic bytes for the requested format. We must verify, because
-  // clipboard tools will sometimes return success with a non-image payload
-  // (HTML, text, etc.) when the requested MIME isn't actually available.
-  const validateMagic = (buf: Buffer, kind: ImageKind): boolean => {
-    if (kind === "png") {
-      // PNG magic: 89 50 4E 47 0D 0A 1A 0A
-      return (
-        buf.length >= 8 &&
-        buf[0] === 0x89 &&
-        buf[1] === 0x50 &&
-        buf[2] === 0x4e &&
-        buf[3] === 0x47
-      );
-    }
-    // BMP magic: 42 4D ("BM"). DIB-only payloads (no file header) won't match
-    // and we'll skip them — wl-paste --type image/bmp on WSLg ships the full
-    // BITMAPFILEHEADER, so this works for the WSL case we care about.
-    return buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d;
-  };
-
-  const tryTool = (cmd: string, args: string[], kind: ImageKind): boolean => {
+  const tryTool = (cmd: string, args: string[]): boolean => {
     try {
       const buf = execFileSync(cmd, args, {
         stdio: ["ignore", "pipe", "ignore"],
         maxBuffer: 64 * 1024 * 1024, // 64MB; large screenshots can exceed default 1MB
       });
       if (!buf || buf.length === 0) return false;
-      // execFileSync returns a Buffer when no encoding is set
       const out = buf as unknown as Buffer;
-      if (!validateMagic(out, kind)) {
+      if (!isPngMagic(out)) {
         clipDebug(
-          `linux ${cmd} returned ${out.length} bytes but magic bytes don't match ${kind}`,
+          `linux ${cmd} returned ${out.length} bytes but magic bytes don't match png`,
         );
         return false;
       }
@@ -431,44 +564,23 @@ function getClipboardImageToTempFileLinux(): {
   };
 
   // Preferred: PNG via Wayland (most modern distros).
-  if (tryTool("wl-paste", ["--type", "image/png"], "png")) {
+  if (tryTool("wl-paste", ["--type", "image/png"])) {
     return { tempPath, uti: "public.png" };
   }
 
   // Preferred: PNG via X11.
-  if (
-    tryTool(
-      "xclip",
-      ["-selection", "clipboard", "-t", "image/png", "-o"],
-      "png",
-    )
-  ) {
+  if (tryTool("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"])) {
     return { tempPath, uti: "public.png" };
   }
 
-  // Fallback: BMP via Wayland. This is the WSLg path — WSLg drops the Windows
-  // CF_DIB / CF_BITMAP onto the Linux clipboard as `image/bmp` only (no PNG
-  // re-encode), so the PNG-first attempts above always miss on WSL. sharp /
-  // libvips handles BMP including the BI_BITFIELDS compression variant that
-  // Windows screenshot tools produce, so once we get the bytes onto disk the
-  // existing resize pipeline does the format normalization for us.
-  if (tryTool("wl-paste", ["--type", "image/bmp"], "bmp")) {
-    return { tempPath, uti: "public.bmp" };
-  }
-
-  // Fallback: BMP via X11.
-  if (
-    tryTool(
-      "xclip",
-      ["-selection", "clipboard", "-t", "image/bmp", "-o"],
-      "bmp",
-    )
-  ) {
-    return { tempPath, uti: "public.bmp" };
+  // WSL fallback: bypass the WSLg BMP-only clipboard via PowerShell interop.
+  if (isWslEnvironment()) {
+    const wslResult = getClipboardImageToTempFileWsl();
+    if (wslResult) return wslResult;
   }
 
   clipDebug(
-    "linux: neither wl-paste nor xclip produced a PNG or BMP from the clipboard",
+    "linux: no PNG available from wl-paste or xclip (and WSL interop did not produce one)",
   );
   return null;
 }
