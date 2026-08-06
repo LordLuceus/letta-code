@@ -1,0 +1,1 @@
+{"version":3,"file":"memory-apply-patch.d.ts","sourceRoot":"","sources":["../../../../src/tools/impl/memory-apply-patch.ts"],"names":[],"mappings":"AAmDA,UAAU,oBAAoB;IAC5B,MAAM,EAAE,MAAM,CAAC;IACf,KAAK,EAAE,MAAM,CAAC;CACf;AAED,UAAU,sBAAsB;IAC9B,OAAO,EAAE,MAAM,CAAC;CACjB;AA6CD,wBAAsB,kBAAkB,CACtC,IAAI,EAAE,oBAAoB,GACzB,OAAO,CAAC,sBAAsB,CAAC,CAuDjC"}
